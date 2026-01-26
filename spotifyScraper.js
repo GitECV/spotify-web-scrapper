@@ -4,6 +4,40 @@ import puppeteer from 'puppeteer';
 
 const OUTPUT_DIR = './data';
 const BASE_URL = 'https://charts.spotify.com/charts/view';
+const LOG_FILE = path.join(OUTPUT_DIR, 'scraper.log');
+
+// Tipos de log con emojis
+const LOG_TYPES = {
+  INFO: { prefix: '📄', label: 'INFO' },
+  SUCCESS: { prefix: '✅', label: 'SUCCESS' },
+  ERROR: { prefix: '❌', label: 'ERROR' },
+  WARNING: { prefix: '⚠️', label: 'WARNING' },
+  WAIT: { prefix: '⏳', label: 'WAIT' },
+  PAUSE: { prefix: '⏸️', label: 'PAUSE' },
+  DOWNLOAD: { prefix: '📥', label: 'DOWNLOAD' },
+  SEARCH: { prefix: '🔍', label: 'SEARCH' },
+  PHOTO: { prefix: '📸', label: 'PHOTO' },
+  STATS: { prefix: '📊', label: 'STATS' },
+  START: { prefix: '🚀', label: 'START' }
+};
+
+// Función de logging que escribe en consola y archivo
+async function log(message, type = 'INFO') {
+  const timestamp = new Date().toISOString();
+  const logType = LOG_TYPES[type] || LOG_TYPES.INFO;
+  const consoleMessage = `${logType.prefix} ${message}`;
+  const fileMessage = `[${timestamp}] [${logType.label}] ${message}\n`;
+  
+  // Mostrar en consola
+  console.log(consoleMessage);
+  
+  // Escribir en archivo
+  try {
+    await fs.appendFile(LOG_FILE, fileMessage);
+  } catch (error) {
+    console.error('Error escribiendo en log file:', error);
+  }
+}
 
 // Función para generar delay aleatorio
 function randomDelay(min, max) {
@@ -15,7 +49,7 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
   
   try {
     const url = `${BASE_URL}/regional-${country}-daily/latest`;
-    console.log(`📄 Navegando a ${url}`);
+    await log(`Navegando a ${url}`, 'INFO');
     
     // Configurar descarga ANTES de navegar
     const tempDir = path.resolve(OUTPUT_DIR, 'temp');
@@ -29,22 +63,23 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
     
     // Solo esperar 30 segundos en la primera descarga para autenticación
     if (isFirstDownload) {
-      console.log('⏳ Esperando 30 segundos para autenticación manual...');
+      await log('Esperando 30 segundos para autenticación manual...', 'WAIT');
       await new Promise(resolve => setTimeout(resolve, 30000));
     } else {
       const waitTime = randomDelay(2000, 5000);
-      console.log(`⏳ Esperando ${waitTime / 1000} segundos...`);
+      await log(`Esperando ${waitTime / 1000} segundos...`, 'WAIT');
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
     
     // Buscar el botón de descarga por aria-labelledby con más tiempo
     try {
       await page.waitForSelector('button[aria-labelledby="csv_download"]', { timeout: 20000 });
-      console.log('🔍 Botón de descarga encontrado');
+      await log('Botón de descarga encontrado', 'SEARCH');
     } catch (error) {
       // Tomar screenshot para debug
       await page.screenshot({ path: path.join(OUTPUT_DIR, 'debug.png') });
-      console.log('📸 Screenshot guardado en data/debug.png');
+      await log('Screenshot guardado en data/debug.png', 'PHOTO');
+      await log(`No se encontró el botón de descarga para ${country}. Revisa el screenshot.`, 'ERROR');
       throw new Error('No se encontró el botón de descarga. Revisa el screenshot.');
     }
     
@@ -52,7 +87,7 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
     await page.click('button[aria-labelledby="csv_download"]');
     
     const downloadWaitTime = randomDelay(4000, 7000);
-    console.log(`⏳ Esperando descarga (${downloadWaitTime / 1000}s)...`);
+    await log(`Esperando descarga (${downloadWaitTime / 1000}s)...`, 'WAIT');
     
     // Esperar a que se complete la descarga
     await new Promise(resolve => setTimeout(resolve, downloadWaitTime));
@@ -65,7 +100,7 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
       throw new Error('No se descargó el archivo CSV');
     }
     
-    console.log(`✅ Archivo descargado: ${csvFile}`);
+    await log(`Archivo descargado: ${csvFile}`, 'SUCCESS');
     
     const csvPath = path.join(tempDir, csvFile);
     const csvContent = await fs.readFile(csvPath, 'utf-8');
@@ -125,7 +160,7 @@ function normalizeTracks(rows) {
 }
 
 async function processCountry(browser, country, isFirstDownload = false) {
-  console.log(`📥 Descargando ${country}`);
+  await log(`Descargando ${country}`, 'DOWNLOAD');
 
   const csv = await downloadCSV(browser, country, isFirstDownload);
   const rows = parseCSV(csv);
@@ -145,12 +180,12 @@ async function processCountry(browser, country, isFirstDownload = false) {
   );
 
   await fs.writeFile(filePath, JSON.stringify(result, null, 2));
-  console.log(`✅ ${country.toUpperCase()} completado - ${tracks.length} canciones guardadas en ${filePath}`);
+  await log(`${country.toUpperCase()} completado - ${tracks.length} canciones guardadas en ${filePath}`, 'SUCCESS');
   
   // Espera aleatoria entre países (excepto en el último)
   if (!isFirstDownload) {
     const betweenCountriesDelay = randomDelay(1000, 3000);
-    console.log(`⏸️  Pausa de ${betweenCountriesDelay / 1000}s antes del siguiente país...\n`);
+    await log(`Pausa de ${betweenCountriesDelay / 1000}s antes del siguiente país...\n`, 'PAUSE');
     await new Promise(resolve => setTimeout(resolve, betweenCountriesDelay));
   }
 }
@@ -159,7 +194,7 @@ async function main() {
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
   await fs.mkdir(path.join(OUTPUT_DIR, 'temp'), { recursive: true });
 
-  console.log('🚀 Iniciando navegador...');
+  await log('Iniciando navegador...', 'START');
   
   const browser = await puppeteer.launch({ 
     headless: false,
@@ -171,7 +206,7 @@ async function main() {
   });
 
   // Lista de países a descargar
-  const countries = ['global', 'ar', 'au', 'at', 'by', 'be', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'hr', 'cy', 'cz', 'dk', 'do', 'ec', 'eg', 'ee', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hu', 'is', 'in', 'id', 'ie', 'il', 'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'md', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'ph', 'pl', 'pt', 'ro', 'ru', 'sa', 'rs', 'sg', 'sk', 'si', 'za', 'kr', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ua', 'ae', 'gb', 'us', 've'];
+  const countries = ['global', 'ar', 'au', 'at', 'by', 'be', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'hr', 'cz', 'dk', 'do', 'ec', 'eg', 'ee', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hu', 'is', 'in', 'id', 'ie', 'il', 'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'ph', 'pl', 'pt', 'ro', 'sa', 'rs', 'sk', 'si', 'kr', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ua', 'ae', 'gb', 'us', 've'];
   let successCount = 0;
   let errorCount = 0;
 
@@ -183,18 +218,18 @@ async function main() {
       await processCountry(browser, country, isFirstDownload);
       successCount++;
     } catch (err) {
-      console.error(`❌ Error en ${country}:`, err.message);
+      await log(`Error en ${country}: ${err.message}`, 'ERROR');
       errorCount++;
     }
   }
 
-  console.log(`\n📊 Resumen:`);
-  console.log(`   ✅ Exitosos: ${successCount}`);
-  console.log(`   ❌ Errores: ${errorCount}`);
-  console.log(`   📁 Archivos en: ${OUTPUT_DIR}`);
+  await log(`\nResumen:`, 'STATS');
+  await log(`   Exitosos: ${successCount}`, 'SUCCESS');
+  await log(`   Errores: ${errorCount}`, 'ERROR');
+  await log(`   Archivos en: ${OUTPUT_DIR}`, 'INFO');
 
   await browser.close();
-  console.log('✅ Proceso completado');
+  await log('Proceso completado', 'SUCCESS');
 }
 
 main();
