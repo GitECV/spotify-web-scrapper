@@ -1,0 +1,20 @@
+{
+  "name": "spotify-scraper",
+  "version": "1.0.0",
+  "description": "Spotify Charts Scraper - Descarga los rankings diarios de Spotify",
+  "main": "spotifyScraper.js",
+  "type": "module",
+  "scripts": {
+    "start": "node spotifyScraper.js"
+  },
+  "keywords": [
+    "spotify",
+    "charts",
+    "scraper"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^24.36.0"
+  }
+}

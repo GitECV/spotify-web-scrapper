@@ -1,0 +1,8 @@
+# Dependencies
+node_modules/
+
+# Data files
+data/
+
+# Lock files
+package-lock.json
