@@ -6,6 +6,10 @@ const OUTPUT_DIR = './data';
 const BASE_URL = 'https://charts.spotify.com/charts/view';
 const LOG_FILE = path.join(OUTPUT_DIR, 'scraper.log');
 
+// Flag para verificar si ya existe la fecha antes de scrapear
+// Cambiar a false para forzar el scrapping aunque la fecha ya exista
+const SKIP_IF_EXISTS = true;
+
 // Tipos de log con emojis
 const LOG_TYPES = {
   INFO: { prefix: '📄', label: 'INFO' },
@@ -44,6 +48,34 @@ function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// Función para obtener la fecha del archivo local si existe
+async function getLocalFileDate(country) {
+  try {
+    const files = await fs.readdir(OUTPUT_DIR);
+    const countryFiles = files.filter(f => 
+      f.startsWith(`spotify_${country}_daily_`) && f.endsWith('.json')
+    );
+    
+    if (countryFiles.length === 0) {
+      return null;
+    }
+    
+    // Obtener el archivo más reciente
+    const latestFile = countryFiles.sort().reverse()[0];
+    
+    // Extraer la fecha del nombre del archivo: spotify_XX_daily_YYYY-MM-DD.json
+    const dateMatch = latestFile.match(/daily_(\d{4}-\d{2}-\d{2})\.json$/);
+    if (dateMatch) {
+      return dateMatch[1];
+    }
+    
+    return null;
+  } catch (error) {
+    await log(`Error al leer archivo local para ${country}: ${error.message}`, 'WARNING');
+    return null;
+  }
+}
+
 async function downloadCSV(browser, country, isFirstDownload = false) {
   const page = await browser.newPage();
   
@@ -60,6 +92,22 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
     });
     
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    
+    // Obtener la fecha de la página
+    let pageDate = null;
+    try {
+      // Intentar extraer la fecha del título o algún elemento de la página
+      // La fecha suele estar en formato YYYY-MM-DD
+      const pageContent = await page.content();
+      const dateMatch = pageContent.match(/"date":"(\d{4}-\d{2}-\d{2})"/) || 
+                       pageContent.match(/(\d{4}-\d{2}-\d{2})/);
+      if (dateMatch) {
+        pageDate = dateMatch[1];
+        await log(`Fecha encontrada en la página: ${pageDate}`, 'INFO');
+      }
+    } catch (error) {
+      await log(`No se pudo extraer la fecha de la página: ${error.message}`, 'WARNING');
+    }
     
     // Solo esperar 30 segundos en la primera descarga para autenticación
     if (isFirstDownload) {
@@ -108,7 +156,7 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
     // Limpiar archivo temporal
     await fs.unlink(csvPath);
     
-    return csvContent;
+    return { csvContent, pageDate };
     
   } finally {
     await page.close();
@@ -160,10 +208,26 @@ function normalizeTracks(rows) {
 }
 
 async function processCountry(browser, country, isFirstDownload = false) {
-  await log(`Descargando ${country}`, 'DOWNLOAD');
+  await log(`Procesando ${country}`, 'DOWNLOAD');
+  
+  // Verificar si existe archivo local (si SKIP_IF_EXISTS está activado)
+  if (SKIP_IF_EXISTS) {
+    const localDate = await getLocalFileDate(country);
+    if (localDate) {
+      await log(`Archivo local encontrado para ${country.toUpperCase()} con fecha: ${localDate}`, 'INFO');
+      
+      // Comparar con la fecha actual del sistema
+      const today = new Date().toISOString().split('T')[0];
+      if (localDate === today) {
+        await log(`⏭️  ${country.toUpperCase()} saltado - La fecha ${localDate} ya ha sido scrappeada`, 'INFO');
+        return { skipped: true, country, date: localDate };
+      }
+    }
+  }
 
-  const csv = await downloadCSV(browser, country, isFirstDownload);
-  const rows = parseCSV(csv);
+  const { csvContent, pageDate } = await downloadCSV(browser, country, isFirstDownload);
+  
+  const rows = parseCSV(csvContent);
   const tracks = normalizeTracks(rows);
 
   const result = {
@@ -188,6 +252,8 @@ async function processCountry(browser, country, isFirstDownload = false) {
     await log(`Pausa de ${betweenCountriesDelay / 1000}s antes del siguiente país...\n`, 'PAUSE');
     await new Promise(resolve => setTimeout(resolve, betweenCountriesDelay));
   }
+  
+  return { skipped: false, country, date: result.date };
 }
 
 async function main() {
@@ -206,17 +272,24 @@ async function main() {
   });
 
   // Lista de países a descargar
-  const countries = ['global', 'ar', 'au', 'at', 'by', 'be', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'hr', 'cz', 'dk', 'do', 'ec', 'eg', 'ee', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hu', 'is', 'in', 'id', 'ie', 'il', 'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'ph', 'pl', 'pt', 'ro', 'sa', 'rs', 'sk', 'si', 'kr', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ua', 'ae', 'gb', 'us', 've'];
+  const countries = ['global', 'ar', 'au', 'at', 'by', 'be', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'hr', 'dk', 'do', 'ec', 'eg', 'ee', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hu', 'is', 'in', 'id', 'ie', 'il', 'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'ph', 'pl', 'pt', 'ro', 'sa', 'rs', 'si', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ua', 'ae', 'gb', 'us', 've'];
   let successCount = 0;
   let errorCount = 0;
+  let skippedCount = 0;
+  
+  await log(`Modo de verificación: ${SKIP_IF_EXISTS ? 'ACTIVADO (saltará fechas ya scrappeadas)' : 'DESACTIVADO (descargará todo)'}`, 'INFO');
 
   for (let i = 0; i < countries.length; i++) {
     const country = countries[i];
     const isFirstDownload = (i === 0); // Solo la primera vez
     
     try {
-      await processCountry(browser, country, isFirstDownload);
-      successCount++;
+      const result = await processCountry(browser, country, isFirstDownload);
+      if (result && result.skipped) {
+        skippedCount++;
+      } else {
+        successCount++;
+      }
     } catch (err) {
       await log(`Error en ${country}: ${err.message}`, 'ERROR');
       errorCount++;
@@ -225,6 +298,7 @@ async function main() {
 
   await log(`\nResumen:`, 'STATS');
   await log(`   Exitosos: ${successCount}`, 'SUCCESS');
+  await log(`   Saltados: ${skippedCount}`, 'INFO');
   await log(`   Errores: ${errorCount}`, 'ERROR');
   await log(`   Archivos en: ${OUTPUT_DIR}`, 'INFO');
 
