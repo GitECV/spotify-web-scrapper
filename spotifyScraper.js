@@ -31,10 +31,10 @@ async function log(message, type = 'INFO') {
   const logType = LOG_TYPES[type] || LOG_TYPES.INFO;
   const consoleMessage = `${logType.prefix} ${message}`;
   const fileMessage = `[${timestamp}] [${logType.label}] ${message}\n`;
-  
+
   // Mostrar en consola
   console.log(consoleMessage);
-  
+
   // Escribir en archivo
   try {
     await fs.appendFile(LOG_FILE, fileMessage);
@@ -48,41 +48,32 @@ function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// Función para obtener la fecha del archivo local si existe
-async function getLocalFileDate(country) {
+// Función para verificar si ya existe un archivo JSON con la fecha específica
+async function checkIfFileExists(country, date) {
   try {
-    const files = await fs.readdir(OUTPUT_DIR);
-    const countryFiles = files.filter(f => 
-      f.startsWith(`spotify_${country}_daily_`) && f.endsWith('.json')
-    );
-    
-    if (countryFiles.length === 0) {
-      return null;
+    const dateFolderPath = path.join(OUTPUT_DIR, date);
+    const fileName = `spotify_${country}_daily_${date}.json`;
+    const filePath = path.join(dateFolderPath, fileName);
+
+    try {
+      await fs.access(filePath);
+      return true; // El archivo existe
+    } catch {
+      return false; // El archivo no existe
     }
-    
-    // Obtener el archivo más reciente
-    const latestFile = countryFiles.sort().reverse()[0];
-    
-    // Extraer la fecha del nombre del archivo: spotify_XX_daily_YYYY-MM-DD.json
-    const dateMatch = latestFile.match(/daily_(\d{4}-\d{2}-\d{2})\.json$/);
-    if (dateMatch) {
-      return dateMatch[1];
-    }
-    
-    return null;
   } catch (error) {
-    await log(`Error al leer archivo local para ${country}: ${error.message}`, 'WARNING');
-    return null;
+    await log(`Error al verificar archivo para ${country}: ${error.message}`, 'WARNING');
+    return false;
   }
 }
 
 async function downloadCSV(browser, country, isFirstDownload = false) {
   const page = await browser.newPage();
-  
+
   try {
     const url = `${BASE_URL}/regional-${country}-daily/latest`;
     await log(`Navegando a ${url}`, 'INFO');
-    
+
     // Configurar descarga ANTES de navegar
     const tempDir = path.resolve(OUTPUT_DIR, 'temp');
     const client = await page.target().createCDPSession();
@@ -90,17 +81,17 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
       behavior: 'allow',
       downloadPath: tempDir
     });
-    
+
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    
+
     // Obtener la fecha de la página
     let pageDate = null;
     try {
       // Intentar extraer la fecha del título o algún elemento de la página
       // La fecha suele estar en formato YYYY-MM-DD
       const pageContent = await page.content();
-      const dateMatch = pageContent.match(/"date":"(\d{4}-\d{2}-\d{2})"/) || 
-                       pageContent.match(/(\d{4}-\d{2}-\d{2})/);
+      const dateMatch = pageContent.match(/"date":"(\d{4}-\d{2}-\d{2})"/) ||
+        pageContent.match(/(\d{4}-\d{2}-\d{2})/);
       if (dateMatch) {
         pageDate = dateMatch[1];
         await log(`Fecha encontrada en la página: ${pageDate}`, 'INFO');
@@ -108,7 +99,7 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
     } catch (error) {
       await log(`No se pudo extraer la fecha de la página: ${error.message}`, 'WARNING');
     }
-    
+
     // Solo esperar 30 segundos en la primera descarga para autenticación
     if (isFirstDownload) {
       await log('Esperando 30 segundos para autenticación manual...', 'WAIT');
@@ -118,7 +109,7 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
       await log(`Esperando ${waitTime / 1000} segundos...`, 'WAIT');
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
-    
+
     // Buscar el botón de descarga por aria-labelledby con más tiempo
     try {
       await page.waitForSelector('button[aria-labelledby="csv_download"]', { timeout: 20000 });
@@ -130,34 +121,46 @@ async function downloadCSV(browser, country, isFirstDownload = false) {
       await log(`No se encontró el botón de descarga para ${country}. Revisa el screenshot.`, 'ERROR');
       throw new Error('No se encontró el botón de descarga. Revisa el screenshot.');
     }
-    
+
     // Click en el botón
     await page.click('button[aria-labelledby="csv_download"]');
-    
+
     const downloadWaitTime = randomDelay(4000, 7000);
     await log(`Esperando descarga (${downloadWaitTime / 1000}s)...`, 'WAIT');
-    
+
     // Esperar a que se complete la descarga
     await new Promise(resolve => setTimeout(resolve, downloadWaitTime));
-    
+
     // Leer el archivo descargado
     const files = await fs.readdir(tempDir);
     const csvFile = files.find(f => f.endsWith('.csv'));
-    
+
     if (!csvFile) {
       throw new Error('No se descargó el archivo CSV');
     }
-    
+
     await log(`Archivo descargado: ${csvFile}`, 'SUCCESS');
-    
+
     const csvPath = path.join(tempDir, csvFile);
     const csvContent = await fs.readFile(csvPath, 'utf-8');
-    
+
+    // Extraer la fecha del nombre del archivo CSV
+    // Formato esperado: regional-XX-daily-YYYY-MM-DD.csv
+    const csvDateMatch = csvFile.match(/(\d{4}-\d{2}-\d{2})/);
+    let csvDate = null;
+    if (csvDateMatch) {
+      csvDate = csvDateMatch[1];
+      await log(`Fecha extraída del nombre del CSV: ${csvDate}`, 'INFO');
+    } else if (pageDate) {
+      csvDate = pageDate;
+      await log(`Usando fecha de la página: ${csvDate}`, 'INFO');
+    }
+
     // Limpiar archivo temporal
     await fs.unlink(csvPath);
-    
-    return { csvContent, pageDate };
-    
+
+    return { csvContent, csvDate, csvFileName: csvFile };
+
   } finally {
     await page.close();
   }
@@ -174,7 +177,7 @@ function parseCSV(csv) {
 
     for (let i = 0; i < line.length; i++) {
       const char = line[i];
-      
+
       if (char === '"') {
         inQuotes = !inQuotes;
       } else if (char === ',' && !inQuotes) {
@@ -207,52 +210,58 @@ function normalizeTracks(rows) {
   }));
 }
 
-async function processCountry(browser, country, isFirstDownload = false) {
+async function processCountry(browser, country, isFirstDownload = false, shouldCheckExistence = false) {
   await log(`Procesando ${country}`, 'DOWNLOAD');
-  
-  // Verificar si existe archivo local (si SKIP_IF_EXISTS está activado)
-  if (SKIP_IF_EXISTS) {
-    const localDate = await getLocalFileDate(country);
-    if (localDate) {
-      await log(`Archivo local encontrado para ${country.toUpperCase()} con fecha: ${localDate}`, 'INFO');
-      
-      // Comparar con la fecha actual del sistema
-      const today = new Date().toISOString().split('T')[0];
-      if (localDate === today) {
-        await log(`⏭️  ${country.toUpperCase()} saltado - La fecha ${localDate} ya ha sido scrappeada`, 'INFO');
-        return { skipped: true, country, date: localDate };
-      }
+
+  // Descargar el CSV para obtener la fecha real
+  const { csvContent, csvDate, csvFileName } = await downloadCSV(browser, country, isFirstDownload);
+
+  if (!csvDate) {
+    throw new Error(`No se pudo extraer la fecha del CSV: ${csvFileName}`);
+  }
+
+  // Verificar si ya existe archivo con esta fecha (solo si shouldCheckExistence está activado)
+  if (shouldCheckExistence && SKIP_IF_EXISTS) {
+    const fileExists = await checkIfFileExists(country, csvDate);
+    if (fileExists) {
+      await log(`⏭️  ${country.toUpperCase()} saltado - Ya existe archivo para la fecha ${csvDate}`, 'INFO');
+      return { skipped: true, country, date: csvDate };
     }
   }
 
-  const { csvContent, pageDate } = await downloadCSV(browser, country, isFirstDownload);
-  
   const rows = parseCSV(csvContent);
   const tracks = normalizeTracks(rows);
+
+  const chartDate = csvDate;
+  await log(`Usando fecha del CSV: ${chartDate}`, 'INFO');
 
   const result = {
     title: 'Spotify Daily Top Songs',
     country: country.toUpperCase(),
-    date: new Date().toISOString().split('T')[0],
+    date: chartDate,
     total_tracks: tracks.length,
     tracks
   };
 
+  // Crear carpeta para la fecha si no existe
+  const dateFolderPath = path.join(OUTPUT_DIR, result.date);
+  await fs.mkdir(dateFolderPath, { recursive: true });
+
   const filePath = path.join(
-    OUTPUT_DIR,
+    dateFolderPath,
     `spotify_${country}_daily_${result.date}.json`
   );
 
   await fs.writeFile(filePath, JSON.stringify(result, null, 2));
   await log(`${country.toUpperCase()} completado - ${tracks.length} canciones guardadas en ${filePath}`, 'SUCCESS');
-  
+
   // Espera aleatoria entre países (excepto en el último)
   if (!isFirstDownload) {
     const betweenCountriesDelay = randomDelay(1000, 3000);
     await log(`Pausa de ${betweenCountriesDelay / 1000}s antes del siguiente país...\n`, 'PAUSE');
     await new Promise(resolve => setTimeout(resolve, betweenCountriesDelay));
   }
-  
+
   return { skipped: false, country, date: result.date };
 }
 
@@ -261,8 +270,8 @@ async function main() {
   await fs.mkdir(path.join(OUTPUT_DIR, 'temp'), { recursive: true });
 
   await log('Iniciando navegador...', 'START');
-  
-  const browser = await puppeteer.launch({ 
+
+  const browser = await puppeteer.launch({
     headless: false,
     args: [
       '--no-sandbox',
@@ -272,20 +281,41 @@ async function main() {
   });
 
   // Lista de países a descargar
-  const countries = ['global', 'ar', 'au', 'at', 'by', 'be', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'hr', 'dk', 'do', 'ec', 'eg', 'ee', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hu', 'is', 'in', 'id', 'ie', 'il', 'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'ph', 'pl', 'pt', 'ro', 'sa', 'rs', 'si', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ua', 'ae', 'gb', 'us', 've'];
+  const countries = [
+    'global', 'ar', 'au', 'at', 'by', 'be', 'bo', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'cz', 'dk', 'do',
+    'ec', 'eg', 'sv', 'ee', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hk', 'hu', 'is', 'in', 'id', 'ie', 'il',
+    'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'pk', 'pa', 'py',
+    'pe', 'ph', 'pl', 'pt', 'ro', 'sa', 'sg', 'sk', 'za', 'kr', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ae',
+    'ua', 'gb', 'uy', 'us', 've', 'vn'
+  ];
   let successCount = 0;
   let errorCount = 0;
   let skippedCount = 0;
-  
-  await log(`Modo de verificación: ${SKIP_IF_EXISTS ? 'ACTIVADO (saltará fechas ya scrappeadas)' : 'DESACTIVADO (descargará todo)'}`, 'INFO');
+
+  await log(`Modo de verificación: ${SKIP_IF_EXISTS ? 'ACTIVADO (solo verificará el primer país - global)' : 'DESACTIVADO (descargará todo)'}`, 'INFO');
+
+  let skipAllCountries = false;
 
   for (let i = 0; i < countries.length; i++) {
     const country = countries[i];
     const isFirstDownload = (i === 0); // Solo la primera vez
-    
+    const shouldCheckExistence = (i === 0); // Solo verificar el primer país
+
+    // Si ya se determinó que hay que saltarse todos, incrementar contador y continuar
+    if (skipAllCountries) {
+      await log(`⏭️  ${country.toUpperCase()} saltado - Ya existe descarga completa para esta fecha`, 'INFO');
+      skippedCount++;
+      continue;
+    }
+
     try {
-      const result = await processCountry(browser, country, isFirstDownload);
+      const result = await processCountry(browser, country, isFirstDownload, shouldCheckExistence);
       if (result && result.skipped) {
+        // Si el primer país fue saltado, saltarse todos los demás
+        if (i === 0) {
+          await log(`El país ${country.toUpperCase()} ya existe para la fecha ${result.date}, se saltarán todos los países`, 'INFO');
+          skipAllCountries = true;
+        }
         skippedCount++;
       } else {
         successCount++;

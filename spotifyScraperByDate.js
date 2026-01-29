@@ -6,10 +6,10 @@ const OUTPUT_DIR = './data';
 const BASE_URL = 'https://charts.spotify.com/charts/view';
 const LOG_FILE = path.join(OUTPUT_DIR, 'scraper.log');
 
-// ===== CONFIGURACIÓN DE FECHA =====
-// Especifica la fecha que quieres scrapear en formato YYYY-MM-DD
-const DATE_TO_SCRAPE = '2026-01-24';
-// ==================================
+// ===== CONFIGURACIÓN DE FECHAS =====
+// Especifica las fechas que quieres scrapear en formato YYYY-MM-DD
+const DATES_TO_SCRAPE = ['2026-01-02', '2026-01-01'];
+// ===================================
 
 // Flag para verificar si ya existe la fecha antes de scrapear
 // Cambiar a false para forzar el scrapping aunque la fecha ya exista
@@ -36,10 +36,10 @@ async function log(message, type = 'INFO') {
   const logType = LOG_TYPES[type] || LOG_TYPES.INFO;
   const consoleMessage = `${logType.prefix} ${message}`;
   const fileMessage = `[${timestamp}] [${logType.label}] ${message}\n`;
-  
+
   // Mostrar en consola
   console.log(consoleMessage);
-  
+
   // Escribir en archivo
   try {
     await fs.appendFile(LOG_FILE, fileMessage);
@@ -54,7 +54,7 @@ function validateDate(dateString) {
   if (!regex.test(dateString)) {
     return false;
   }
-  
+
   const date = new Date(dateString);
   return date instanceof Date && !isNaN(date);
 }
@@ -68,8 +68,8 @@ function randomDelay(min, max) {
 async function checkIfDateExists(country, date) {
   try {
     const fileName = `spotify_${country}_daily_${date}.json`;
-    const filePath = path.join(OUTPUT_DIR, fileName);
-    
+    const filePath = path.join(OUTPUT_DIR, date, fileName);
+
     try {
       await fs.access(filePath);
       return true; // El archivo existe
@@ -84,11 +84,11 @@ async function checkIfDateExists(country, date) {
 
 async function downloadCSV(browser, country, date) {
   const page = await browser.newPage();
-  
+
   try {
     const url = `${BASE_URL}/regional-${country}-daily/${date}`;
     await log(`📍 URL construida: ${url}`, 'INFO');
-    
+
     // Configurar descarga ANTES de navegar
     const tempDir = path.resolve(OUTPUT_DIR, 'temp');
     const client = await page.target().createCDPSession();
@@ -96,14 +96,14 @@ async function downloadCSV(browser, country, date) {
       behavior: 'allow',
       downloadPath: tempDir
     });
-    
+
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    
+
     // Espera aleatoria para simular comportamiento humano
     const waitTime = randomDelay(2000, 5000);
     await log(`Esperando ${waitTime / 1000} segundos...`, 'WAIT');
     await new Promise(resolve => setTimeout(resolve, waitTime));
-    
+
     // Buscar el botón de descarga por aria-labelledby con más tiempo
     try {
       await page.waitForSelector('button[aria-labelledby="csv_download"]', { timeout: 20000 });
@@ -115,34 +115,43 @@ async function downloadCSV(browser, country, date) {
       await log(`No se encontró el botón de descarga para ${country}. Revisa el screenshot.`, 'ERROR');
       throw new Error('No se encontró el botón de descarga. Revisa el screenshot.');
     }
-    
+
     // Click en el botón
     await page.click('button[aria-labelledby="csv_download"]');
-    
+
     const downloadWaitTime = randomDelay(4000, 7000);
     await log(`Esperando descarga (${downloadWaitTime / 1000}s)...`, 'WAIT');
-    
+
     // Esperar a que se complete la descarga
     await new Promise(resolve => setTimeout(resolve, downloadWaitTime));
-    
+
     // Leer el archivo descargado
     const files = await fs.readdir(tempDir);
     const csvFile = files.find(f => f.endsWith('.csv'));
-    
+
     if (!csvFile) {
       throw new Error('No se descargó el archivo CSV');
     }
-    
+
     await log(`Archivo descargado: ${csvFile}`, 'SUCCESS');
-    
+
     const csvPath = path.join(tempDir, csvFile);
     const csvContent = await fs.readFile(csvPath, 'utf-8');
-    
+
+    // Extraer la fecha del nombre del archivo CSV
+    // Formato esperado: regional-XX-daily-YYYY-MM-DD.csv
+    const csvDateMatch = csvFile.match(/(\d{4}-\d{2}-\d{2})/);
+    let csvDate = null;
+    if (csvDateMatch) {
+      csvDate = csvDateMatch[1];
+      await log(`Fecha extraída del nombre del CSV: ${csvDate}`, 'INFO');
+    }
+
     // Limpiar archivo temporal
     await fs.unlink(csvPath);
-    
-    return csvContent;
-    
+
+    return { csvContent, csvDate, csvFileName: csvFile };
+
   } finally {
     await page.close();
   }
@@ -159,7 +168,7 @@ function parseCSV(csv) {
 
     for (let i = 0; i < line.length; i++) {
       const char = line[i];
-      
+
       if (char === '"') {
         inQuotes = !inQuotes;
       } else if (char === ',' && !inQuotes) {
@@ -194,59 +203,75 @@ function normalizeTracks(rows) {
 
 async function processCountry(browser, country, date) {
   await log(`Procesando ${country} para fecha ${date}`, 'DOWNLOAD');
-  
-  // Verificar si existe archivo local (si SKIP_IF_EXISTS está activado)
+
+  // Descargar el CSV para obtener la fecha real
+  const { csvContent, csvDate, csvFileName } = await downloadCSV(browser, country, date);
+
+  if (!csvDate) {
+    throw new Error(`No se pudo extraer la fecha del CSV: ${csvFileName}`);
+  }
+
+  // Verificar si la fecha del CSV coincide con la fecha solicitada
+  if (csvDate !== date) {
+    await log(`⚠️  Advertencia: La fecha del CSV (${csvDate}) no coincide con la fecha solicitada (${date})`, 'WARNING');
+  }
+
+  // Verificar si ya existe archivo con esta fecha (si SKIP_IF_EXISTS está activado)
   if (SKIP_IF_EXISTS) {
-    const exists = await checkIfDateExists(country, date);
+    const exists = await checkIfDateExists(country, csvDate);
     if (exists) {
-      await log(`⏭️  ${country.toUpperCase()} saltado - La fecha ${date} ya ha sido scrappeada`, 'INFO');
-      return { skipped: true, country, date };
+      await log(`⏭️  ${country.toUpperCase()} saltado - Ya existe archivo para la fecha ${csvDate}`, 'INFO');
+      return { skipped: true, country, date: csvDate };
     }
   }
 
-  const csvContent = await downloadCSV(browser, country, date);
-  
   const rows = parseCSV(csvContent);
   const tracks = normalizeTracks(rows);
 
   const result = {
     title: 'Spotify Daily Top Songs',
     country: country.toUpperCase(),
-    date: date,
+    date: csvDate,
     total_tracks: tracks.length,
     tracks
   };
 
+  // Crear carpeta para la fecha si no existe
+  const dateFolderPath = path.join(OUTPUT_DIR, csvDate);
+  await fs.mkdir(dateFolderPath, { recursive: true });
+
   const filePath = path.join(
-    OUTPUT_DIR,
-    `spotify_${country}_daily_${date}.json`
+    dateFolderPath,
+    `spotify_${country}_daily_${csvDate}.json`
   );
 
   await fs.writeFile(filePath, JSON.stringify(result, null, 2));
   await log(`${country.toUpperCase()} completado - ${tracks.length} canciones guardadas en ${filePath}`, 'SUCCESS');
-  
+
   // Espera aleatoria entre países
   const betweenCountriesDelay = randomDelay(1000, 3000);
   await log(`Pausa de ${betweenCountriesDelay / 1000}s antes del siguiente país...\n`, 'PAUSE');
   await new Promise(resolve => setTimeout(resolve, betweenCountriesDelay));
-  
+
   return { skipped: false, country, date };
 }
 
 async function main() {
-  // Validar formato de fecha
-  if (!validateDate(DATE_TO_SCRAPE)) {
-    console.error(`❌ Error: La fecha "${DATE_TO_SCRAPE}" no es válida. Usa formato YYYY-MM-DD`);
-    process.exit(1);
+  // Validar formato de todas las fechas
+  for (const date of DATES_TO_SCRAPE) {
+    if (!validateDate(date)) {
+      console.error(`❌ Error: La fecha "${date}" no es válida. Usa formato YYYY-MM-DD`);
+      process.exit(1);
+    }
   }
-  
+
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
   await fs.mkdir(path.join(OUTPUT_DIR, 'temp'), { recursive: true });
 
-  await log(`Iniciando scraping para fecha: ${DATE_TO_SCRAPE}`, 'START');
+  await log(`Iniciando scraping para ${DATES_TO_SCRAPE.length} fecha(s): ${DATES_TO_SCRAPE.join(', ')}`, 'START');
   await log('Iniciando navegador...', 'START');
-  
-  const browser = await puppeteer.launch({ 
+
+  const browser = await puppeteer.launch({
     headless: false,
     args: [
       '--no-sandbox',
@@ -262,37 +287,76 @@ async function main() {
   await log('Esperando 30 segundos para autenticación manual...', 'WAIT');
   await new Promise(resolve => setTimeout(resolve, 30000));
   await authPage.close();
-  await log('Autenticación completada, iniciando descarga para fecha: ' + DATE_TO_SCRAPE, 'SUCCESS');
+  await log('Autenticación completada, iniciando descargas...', 'SUCCESS');
 
   // Lista de países a descargar
-  const countries = ['global', 'ar', 'au', 'at', 'by', 'be', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'dk', 'do', 'ec', 'eg', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hu', 'is', 'in', 'id', 'ie', 'il', 'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'ph', 'pl', 'pt', 'ro', 'sa', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ua', 'ae', 'gb', 'us', 've'];
-  let successCount = 0;
-  let errorCount = 0;
-  let skippedCount = 0;
-  
+  const countries = [
+    'global', 'ar', 'au', 'at', 'by', 'be', 'bo', 'br', 'bg', 'ca', 'cl', 'co', 'cr', 'cz', 'dk', 'do',
+    'ec', 'eg', 'sv', 'ee', 'fi', 'fr', 'de', 'gr', 'gt', 'hn', 'hk', 'hu', 'is', 'in', 'id', 'ie', 'il',
+    'it', 'jp', 'kz', 'lv', 'lt', 'lu', 'my', 'mx', 'ma', 'nl', 'nz', 'ni', 'ng', 'no', 'pk', 'pa', 'py',
+    'pe', 'ph', 'pl', 'pt', 'ro', 'sa', 'sg', 'sk', 'za', 'kr', 'es', 'se', 'ch', 'tw', 'th', 'tr', 'ae',
+    'ua', 'gb', 'uy', 'us', 've', 'vn'
+  ];
+
   await log(`Modo de verificación: ${SKIP_IF_EXISTS ? 'ACTIVADO (saltará fechas ya scrappeadas)' : 'DESACTIVADO (descargará todo)'}`, 'INFO');
 
-  for (let i = 0; i < countries.length; i++) {
-    const country = countries[i];
-    
-    try {
-      const result = await processCountry(browser, country, DATE_TO_SCRAPE, false);
-      if (result && result.skipped) {
-        skippedCount++;
-      } else {
-        successCount++;
+  let totalSuccessCount = 0;
+  let totalErrorCount = 0;
+  let totalSkippedCount = 0;
+
+  // Procesar cada fecha
+  for (let dateIndex = 0; dateIndex < DATES_TO_SCRAPE.length; dateIndex++) {
+    const currentDate = DATES_TO_SCRAPE[dateIndex];
+    await log(`\n${'='.repeat(60)}`, 'INFO');
+    await log(`Procesando fecha ${dateIndex + 1}/${DATES_TO_SCRAPE.length}: ${currentDate}`, 'START');
+    await log(`${'='.repeat(60)}`, 'INFO');
+
+    let successCount = 0;
+    let errorCount = 0;
+    let skippedCount = 0;
+
+    for (let i = 0; i < countries.length; i++) {
+      const country = countries[i];
+
+      try {
+        const result = await processCountry(browser, country, currentDate, false);
+        if (result && result.skipped) {
+          skippedCount++;
+        } else {
+          successCount++;
+        }
+      } catch (err) {
+        await log(`Error en ${country}: ${err.message}`, 'ERROR');
+        errorCount++;
       }
-    } catch (err) {
-      await log(`Error en ${country}: ${err.message}`, 'ERROR');
-      errorCount++;
+    }
+
+    await log(`\nResumen para fecha ${currentDate}:`, 'STATS');
+    await log(`   Exitosos: ${successCount}`, 'SUCCESS');
+    await log(`   Saltados: ${skippedCount}`, 'INFO');
+    await log(`   Errores: ${errorCount}`, 'ERROR');
+
+    totalSuccessCount += successCount;
+    totalErrorCount += errorCount;
+    totalSkippedCount += skippedCount;
+
+    // Pausa entre fechas (excepto en la última)
+    if (dateIndex < DATES_TO_SCRAPE.length - 1) {
+      await log(`\nPróxima fecha: ${DATES_TO_SCRAPE[dateIndex + 1]}`, 'INFO');
+      const betweenDatesDelay = randomDelay(2000, 4000);
+      await log(`Pausa de ${betweenDatesDelay / 1000}s antes de la siguiente fecha...\n`, 'PAUSE');
+      await new Promise(resolve => setTimeout(resolve, betweenDatesDelay));
     }
   }
 
-  await log(`\nResumen para fecha ${DATE_TO_SCRAPE}:`, 'STATS');
-  await log(`   Exitosos: ${successCount}`, 'SUCCESS');
-  await log(`   Saltados: ${skippedCount}`, 'INFO');
-  await log(`   Errores: ${errorCount}`, 'ERROR');
+  await log(`\n${'='.repeat(60)}`, 'INFO');
+  await log(`RESUMEN FINAL - ${DATES_TO_SCRAPE.length} fecha(s) procesada(s)`, 'STATS');
+  await log(`${'='.repeat(60)}`, 'INFO');
+  await log(`   Total Exitosos: ${totalSuccessCount}`, 'SUCCESS');
+  await log(`   Total Saltados: ${totalSkippedCount}`, 'INFO');
+  await log(`   Total Errores: ${totalErrorCount}`, 'ERROR');
   await log(`   Archivos en: ${OUTPUT_DIR}`, 'INFO');
+  await log(`   Fechas procesadas: ${DATES_TO_SCRAPE.join(', ')}`, 'INFO');
 
   await browser.close();
   await log('Proceso completado', 'SUCCESS');
