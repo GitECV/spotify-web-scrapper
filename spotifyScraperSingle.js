@@ -3,8 +3,13 @@ import path from 'path';
 import puppeteer from 'puppeteer';
 
 // ===== CONFIGURACIÓN =====
-const TARGET_DATE = '2026-01-15';  // Formato: YYYY-MM-DD
-const TARGET_COUNTRY = 'ph';        // Código de país (ej: ar, us, es, global)
+const TARGETS = [
+  { date: '2026-01-15', country: 'ph' },
+  { date: '2026-01-13', country: 'jp' },
+  { date: '2026-01-10', country: 'ee' },
+  { date: '2026-01-10', country: 'pl' },
+  // Agrega más combinaciones según necesites
+];
 // =========================
 
 const OUTPUT_DIR = './data';
@@ -163,22 +168,29 @@ function normalizeTracks(rows) {
 }
 
 async function main() {
-  // Validar fecha
-  if (!validateDate(TARGET_DATE)) {
-    console.error(`❌ Error: La fecha "${TARGET_DATE}" no es válida. Usa formato YYYY-MM-DD`);
+  // Validar configuración
+  if (!Array.isArray(TARGETS) || TARGETS.length === 0) {
+    console.error(`❌ Error: TARGETS debe ser un array con al menos un elemento`);
     process.exit(1);
   }
 
-  // Validar país
-  if (!TARGET_COUNTRY || TARGET_COUNTRY.trim() === '') {
-    console.error(`❌ Error: El país "${TARGET_COUNTRY}" no es válido`);
-    process.exit(1);
+  // Validar cada target
+  for (let i = 0; i < TARGETS.length; i++) {
+    const target = TARGETS[i];
+    if (!validateDate(target.date)) {
+      console.error(`❌ Error: La fecha "${target.date}" en el índice ${i} no es válida. Usa formato YYYY-MM-DD`);
+      process.exit(1);
+    }
+    if (!target.country || target.country.trim() === '') {
+      console.error(`❌ Error: El país "${target.country}" en el índice ${i} no es válido`);
+      process.exit(1);
+    }
   }
 
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
   await fs.mkdir(path.join(OUTPUT_DIR, 'temp'), { recursive: true });
 
-  await log(`Iniciando scraping para ${TARGET_COUNTRY.toUpperCase()} - ${TARGET_DATE}`, 'START');
+  await log(`Iniciando scraping para ${TARGETS.length} combinación(es) de fecha/país`, 'START');
 
   const browser = await puppeteer.launch({
     headless: false,
@@ -194,49 +206,73 @@ async function main() {
     await log('Abriendo página para autenticación...', 'INFO');
     const authPage = await browser.newPage();
     await authPage.goto(`${BASE_URL}/regional-global-daily/latest`, { waitUntil: 'networkidle2', timeout: 60000 });
-    await log('Esperando 10 segundos para autenticación manual si es necesaria...', 'WAIT');
-    await new Promise(resolve => setTimeout(resolve, 20000));
+    await log('Esperando 40 segundos para autenticación manual si es necesaria...', 'WAIT');
+    await new Promise(resolve => setTimeout(resolve, 40000));
     await authPage.close();
     await log('Autenticación completada, iniciando descarga...', 'SUCCESS');
 
-    await log(`Procesando ${TARGET_COUNTRY.toUpperCase()}...`, 'DOWNLOAD');
+    // Procesar cada target
+    let completedCount = 0;
+    let errorCount = 0;
 
-    // Descargar CSV
-    const csvContent = await downloadCSV(browser, TARGET_COUNTRY, TARGET_DATE);
+    for (const target of TARGETS) {
+      const { date, country } = target;
+      
+      try {
+        await log(`[${completedCount + errorCount + 1}/${TARGETS.length}] Procesando ${country.toUpperCase()} - ${date}...`, 'DOWNLOAD');
 
-    // Parsear y normalizar datos
-    const rows = parseCSV(csvContent);
-    const tracks = normalizeTracks(rows);
+        // Descargar CSV
+        const csvContent = await downloadCSV(browser, country, date);
 
-    // Crear objeto JSON
-    const result = {
-      title: 'Spotify Daily Top Songs',
-      country: TARGET_COUNTRY.toUpperCase(),
-      date: TARGET_DATE,
-      total_tracks: tracks.length,
-      tracks
-    };
+        // Parsear y normalizar datos
+        const rows = parseCSV(csvContent);
+        const tracks = normalizeTracks(rows);
 
-    // Crear carpeta para la fecha
-    const dateFolderPath = path.join(OUTPUT_DIR, TARGET_DATE);
-    await fs.mkdir(dateFolderPath, { recursive: true });
+        // Crear objeto JSON
+        const result = {
+          title: 'Spotify Daily Top Songs',
+          country: country.toUpperCase(),
+          date: date,
+          total_tracks: tracks.length,
+          tracks
+        };
 
-    // Guardar JSON
-    const filePath = path.join(
-      dateFolderPath,
-      `spotify_${TARGET_COUNTRY}_daily_${TARGET_DATE}.json`
-    );
+        // Crear carpeta para la fecha
+        const dateFolderPath = path.join(OUTPUT_DIR, date);
+        await fs.mkdir(dateFolderPath, { recursive: true });
 
-    await fs.writeFile(filePath, JSON.stringify(result, null, 2));
-    await log(`${TARGET_COUNTRY.toUpperCase()} completado - ${tracks.length} canciones guardadas`, 'SUCCESS');
-    await log(`Archivo guardado en: ${filePath}`, 'INFO');
+        // Guardar JSON
+        const filePath = path.join(
+          dateFolderPath,
+          `spotify_${country}_daily_${date}.json`
+        );
+
+        await fs.writeFile(filePath, JSON.stringify(result, null, 2));
+        await log(`${country.toUpperCase()} - ${date} completado - ${tracks.length} canciones guardadas`, 'SUCCESS');
+        await log(`Archivo guardado en: ${filePath}`, 'INFO');
+        
+        completedCount++;
+
+        // Espera entre descargas para evitar ser bloqueado
+        if (completedCount < TARGETS.length) {
+          const pauseTime = randomDelay(3000, 6000);
+          await log(`Pausa de ${pauseTime / 1000}s antes de la siguiente descarga...`, 'WAIT');
+          await new Promise(resolve => setTimeout(resolve, pauseTime));
+        }
+
+      } catch (error) {
+        errorCount++;
+        await log(`Error procesando ${country.toUpperCase()} - ${date}: ${error.message}`, 'ERROR');
+      }
+    }
+
+    await log(`Proceso completado: ${completedCount} exitosos, ${errorCount} errores`, completedCount === TARGETS.length ? 'SUCCESS' : 'WARNING');
 
   } catch (error) {
-    await log(`Error: ${error.message}`, 'ERROR');
+    await log(`Error crítico: ${error.message}`, 'ERROR');
     throw error;
   } finally {
     await browser.close();
-    await log('Proceso completado', 'SUCCESS');
   }
 }
 
