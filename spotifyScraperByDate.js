@@ -8,7 +8,7 @@ const LOG_FILE = path.join(OUTPUT_DIR, 'scraper.log');
 
 // ===== CONFIGURACIÓN DE FECHAS =====
 // Especifica las fechas que quieres scrapear en formato YYYY-MM-DD
-const DATES_TO_SCRAPE = ['2026-01-02', '2026-01-01'];
+const DATES_TO_SCRAPE = ['2025-12-16', '2025-12-17', '2025-12-18', '2025-12-19', '2025-12-20', '2025-12-21', '2025-12-22', '2025-12-23', '2025-12-24', '2025-12-25', '2025-12-26', '2025-12-27', '2025-12-28', '2025-12-29', '2025-12-30', '2025-12-31'];
 // ===================================
 
 // Flag para verificar si ya existe la fecha antes de scrapear
